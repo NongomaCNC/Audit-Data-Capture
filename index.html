@@ -125,7 +125,8 @@
         #syncBtn { background: #6c757d; } /* Grey */
         #viewDataBtn { background: #17a2b8; } /* Teal */
         #clearDataBtn { background: #dc3545; } /* Red */
-        .editBtn { background: #007bff; font-size: 0.8rem; padding: 0.4rem 0.6rem; }
+        .editBtn { background: #007bff; font-size: 0.8rem; padding: 0.4rem 0.6rem; margin-right: 5px; }
+        .deleteBtn { background: #dc3545; font-size: 0.8rem; padding: 0.4rem 0.6rem; }
 
 
         /* ---------- MESSAGES ---------- */
@@ -368,6 +369,22 @@
             });
         }
 
+        // Delete a record from IndexedDB
+        function deleteRecord(id) {
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([STORE_NAME], 'readwrite');
+                const store = transaction.objectStore(STORE_NAME);
+                const request = store.delete(id);
+
+                request.onsuccess = () => resolve();
+                request.onerror = (event) => {
+                    console.error('Delete record error:', event.target.error);
+                    showMessage('Error deleting data.', 'error');
+                    reject(event.target.error);
+                };
+            });
+        }
+
         // Get all records from IndexedDB
         function getAllRecords() {
             return new Promise((resolve, reject) => {
@@ -436,6 +453,8 @@
 
         /* --- Decimal Degrees to DD MM SS.SSS with Hemisphere --- */
         function toDMS(dec, type) {
+            if (dec === null || dec === undefined || isNaN(dec)) return '';
+
             const abs = Math.abs(dec);
             const deg = Math.floor(abs);
             const minF = (abs - deg) * 60;
@@ -466,9 +485,11 @@
             const dd = String(today.getDate()).padStart(2, '0');
             document.getElementById('date').value = `${yyyy}-${mm}-${dd}`;
 
-            // Clear GPS fields
-            document.getElementById('lat').value = '';
-            document.getElementById('lon').value = '';
+            // Clear GPS fields (only if not currently getting GPS or already populated)
+            if (!document.getElementById('lat').value && !document.getElementById('lon').value) {
+                document.getElementById('lat').value = '';
+                document.getElementById('lon').value = '';
+            }
 
             currentEditingRecordId = null; // Reset editing state
             document.getElementById('submitBtn').textContent = 'Save Data'; // Change button back to Save
@@ -535,7 +556,10 @@
             e.preventDefault();
 
             const formData = new FormData(this);
-            const data = Object.fromEntries(formData.entries());
+            const data = {};
+            for (let [key, value] of formData.entries()) {
+                data[key] = value;
+            }
 
             // Transformer No validation
             if (!data.transformerNo.trim()) {
@@ -547,16 +571,31 @@
             // Format date to YYYY/MM/DD
             if (data.date) {
                 const d = new Date(data.date);
-                const yyyy = d.getFullYear();
-                const mm = String(d.getMonth() + 1).padStart(2, '0');
-                const dd = String(d.getDate()).padStart(2, '0');
-                data.date = `${yyyy}/${mm}/${dd}`;
+                // Ensure date is valid before formatting
+                if (!isNaN(d.getTime())) {
+                    const yyyy = d.getFullYear();
+                    const mm = String(d.getMonth() + 1).padStart(2, '0');
+                    const dd = String(d.getDate()).padStart(2, '0');
+                    data.date = `${yyyy}/${mm}/${dd}`;
+                } else {
+                    data.date = ''; // Clear invalid date
+                }
             }
+
+            // Convert number fields explicitly
+            data.ampLimit = data.ampLimit ? parseFloat(data.ampLimit) : '';
+            data.newMeterAmpLimit = data.newMeterAmpLimit ? parseFloat(data.newMeterAmpLimit) : '';
+            // Handle ID as number for IndexedDB key
+            if (data.id) {
+                data.id = parseInt(data.id, 10);
+            }
+
 
             try {
                 if (currentEditingRecordId) {
                     // Update existing record
-                    data.id = currentEditingRecordId; // Add the ID back to the data object
+                    // currentEditingRecordId is already set by the edit button click
+                    // And data.id is populated from the hidden input
                     await updateRecord(data);
                     showMessage('Data updated successfully offline ✔', 'success');
                 } else {
@@ -666,6 +705,53 @@
         const savedTableBody = document.getElementById('savedTableBody');
         const captureForm = document.getElementById('captureForm');
 
+
+        // Function to populate the form with a given record's data
+        function populateFormForEdit(record) {
+            // Iterate over all form elements
+            Array.from(captureForm.elements).forEach(element => {
+                if (element.name && record.hasOwnProperty(element.name)) {
+                    let value = record[element.name];
+
+                    if (element.type === 'date') {
+                        // For date input, convert YYYY/MM/DD to YYYY-MM-DD
+                        if (value && typeof value === 'string' && value.includes('/')) {
+                            value = value.replace(/\//g, '-');
+                        }
+                        element.value = value || '';
+                    } else if (element.tagName === 'SELECT') {
+                        // For select elements, set the value directly
+                        element.value = value || '';
+                    } else if (element.type === 'number') {
+                        // For number inputs, ensure it's a valid number or empty string
+                        element.value = (value !== null && value !== undefined && !isNaN(parseFloat(value))) ? parseFloat(value) : '';
+                    }
+                    else if (element.type === 'radio' || element.type === 'checkbox') {
+                        // Not applicable for this form, but good practice for future
+                        // For radio/checkbox, you'd check element.value against the record value
+                        if (element.value === value) {
+                            element.checked = true;
+                        } else {
+                            element.checked = false;
+                        }
+                    } else {
+                        // For all other text/textarea inputs
+                        element.value = value || '';
+                    }
+                }
+            });
+
+            // Set the hidden ID and update editing state
+            document.getElementById('recordId').value = record.id;
+            currentEditingRecordId = record.id;
+            document.getElementById('submitBtn').textContent = 'Update Data';
+
+            window.scrollTo({ top: 0, behavior: 'smooth' }); // Scroll to top
+            showMessage('Data loaded for editing.', 'info');
+            savedDataSection.classList.remove('visible'); // Hide the table view
+        }
+
+
         document.getElementById('viewDataBtn').addEventListener('click', async () => {
             if (savedDataSection.classList.contains('visible')) {
                 savedDataSection.classList.remove('visible');
@@ -695,7 +781,7 @@
                 headerRow.appendChild(actionsTh);
                 savedTableHeader.appendChild(headerRow);
 
-                // Populate table body with data and Add Edit Button
+                // Populate table body with data and Add Edit/Delete Buttons
                 records.forEach(record => {
                     const row = document.createElement('tr');
                     fieldOrder.forEach(key => {
@@ -705,12 +791,19 @@
                     });
 
                     const actionsTd = document.createElement('td');
+
                     const editButton = document.createElement('button');
                     editButton.textContent = 'Edit';
                     editButton.classList.add('editBtn');
-                    // Store the record ID on the button for easy retrieval
-                    editButton.dataset.recordId = record.id;
+                    editButton.dataset.recordId = record.id; // Store ID
                     actionsTd.appendChild(editButton);
+
+                    const deleteButton = document.createElement('button');
+                    deleteButton.textContent = 'Delete';
+                    deleteButton.classList.add('deleteBtn');
+                    deleteButton.dataset.recordId = record.id; // Store ID
+                    actionsTd.appendChild(deleteButton);
+
                     row.appendChild(actionsTd);
                     savedTableBody.appendChild(row);
                 });
@@ -724,47 +817,33 @@
             }
         });
 
-        // Event listener for the "Edit" buttons (delegated to the table body)
+        // Event listener for the "Edit" and "Delete" buttons (delegated to the table body)
         savedTableBody.addEventListener('click', async (event) => {
+            const recordId = parseInt(event.target.dataset.recordId, 10);
+
             if (event.target.classList.contains('editBtn')) {
-                const recordId = parseInt(event.target.dataset.recordId, 10);
                 try {
                     const recordToEdit = await getRecordById(recordId);
                     if (recordToEdit) {
-                        // Populate the form fields with the data from the selected record
-                        for (const key in recordToEdit) {
-                            const inputElement = document.getElementById(key);
-                            if (inputElement) {
-                                // Handle date input specifically (needs YYYY-MM-DD format)
-                                if (key === 'date' && recordToEdit[key]) {
-                                    const dateParts = recordToEdit[key].split('/'); // Assuming YYYY/MM/DD
-                                    if (dateParts.length === 3) {
-                                        inputElement.value = `${dateParts[0]}-${dateParts[1]}-${dateParts[2]}`;
-                                    } else {
-                                        inputElement.value = recordToEdit[key]; // Fallback for other date formats
-                                    }
-                                } else {
-                                    inputElement.value = recordToEdit[key];
-                                }
-                            }
-                        }
-                        // Store the ID of the record being edited in the hidden input
-                        document.getElementById('recordId').value = recordId;
-                        currentEditingRecordId = recordId; // Set global flag
-
-                        // Change the submit button text to indicate editing mode
-                        document.getElementById('submitBtn').textContent = 'Update Data';
-
-                        // Scroll to the top of the form for better UX on mobile
-                        window.scrollTo({ top: 0, behavior: 'smooth' });
-                        showMessage('Data loaded for editing.', 'info');
-                        savedDataSection.classList.remove('visible'); // Hide the table view
+                        populateFormForEdit(recordToEdit);
                     } else {
                         showMessage('Record not found for editing.', 'error');
                     }
                 } catch (error) {
                     console.error('Error loading record for editing:', error);
                     showMessage('Failed to load record for editing.', 'error');
+                }
+            } else if (event.target.classList.contains('deleteBtn')) {
+                if (confirm('Are you sure you want to delete this record?')) {
+                    try {
+                        await deleteRecord(recordId);
+                        showMessage('Record deleted successfully.', 'success');
+                        // Re-display data after deletion
+                        document.getElementById('viewDataBtn').click(); // Simulate click to refresh table
+                    } catch (error) {
+                        console.error('Error deleting record:', error);
+                        showMessage('Failed to delete record.', 'error');
+                    }
                 }
             }
         });
