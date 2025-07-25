@@ -125,6 +125,7 @@
         #syncBtn { background: #6c757d; } /* Grey */
         #viewDataBtn { background: #17a2b8; } /* Teal */
         #clearDataBtn { background: #dc3545; } /* Red */
+        .editBtn { background: #007bff; font-size: 0.8rem; padding: 0.4rem 0.6rem; }
 
 
         /* ---------- MESSAGES ---------- */
@@ -211,6 +212,8 @@
     <h1>Field Data Capture</h1>
 
     <form id="captureForm">
+        <input type="hidden" id="recordId" name="id" value="">
+
         <div class="field"><label for="workorderNo">Workorder No</label><input id="workorderNo" name="workorderNo" type="text" placeholder="Optional"></div>
         <div class="field"><label for="zone">Zone</label><input id="zone" name="zone" type="text" placeholder="e.g., North"></div>
         <div class="field"><label for="sector">Sector</label><input id="sector" name="sector" type="text" placeholder="e.g., A"></div>
@@ -305,6 +308,7 @@
         const STORE_NAME = 'records';
 
         let db;
+        let currentEditingRecordId = null; // To keep track of the record being edited
 
         // Initialize IndexedDB
         function initDb() {
@@ -314,6 +318,7 @@
                 request.onupgradeneeded = (event) => {
                     db = event.target.result;
                     if (!db.objectStoreNames.contains(STORE_NAME)) {
+                        // Create object store with auto-incrementing key
                         db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
                     }
                 };
@@ -347,6 +352,22 @@
             });
         }
 
+        // Update a record in IndexedDB
+        function updateRecord(record) {
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([STORE_NAME], 'readwrite');
+                const store = transaction.objectStore(STORE_NAME);
+                const request = store.put(record); // put() updates if key exists, adds if not
+
+                request.onsuccess = () => resolve();
+                request.onerror = (event) => {
+                    console.error('Update record error:', event.target.error);
+                    showMessage('Error updating data.', 'error');
+                    reject(event.target.error);
+                };
+            });
+        }
+
         // Get all records from IndexedDB
         function getAllRecords() {
             return new Promise((resolve, reject) => {
@@ -357,7 +378,23 @@
                 request.onsuccess = (event) => resolve(event.target.result);
                 request.onerror = (event) => {
                     console.error('Get all records error:', event.target.error);
-                    showMessage('Error retrieving data for export.', 'error');
+                    showMessage('Error retrieving data for display/export.', 'error');
+                    reject(event.target.error);
+                };
+            });
+        }
+
+        // Get a single record by ID from IndexedDB
+        function getRecordById(id) {
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([STORE_NAME], 'readonly');
+                const store = transaction.objectStore(STORE_NAME);
+                const request = store.get(id);
+
+                request.onsuccess = (event) => resolve(event.target.result);
+                request.onerror = (event) => {
+                    console.error('Get record by ID error:', event.target.error);
+                    showMessage('Error retrieving record for editing.', 'error');
                     reject(event.target.error);
                 };
             });
@@ -413,8 +450,28 @@
             }
 
             // Pad degrees and minutes to two digits, seconds to 6 (including decimals)
-            // Use String() explicitly for padding consistency
             return `${String(deg).padStart(2, '0')} ${String(min).padStart(2, '0')} ${sec.padStart(6, '0')} ${hemisphere}`;
+        }
+
+        /* --- Reset Form Function --- */
+        function resetFormAndGPS() {
+            const form = document.getElementById('captureForm');
+            form.reset();
+            document.getElementById('recordId').value = ''; // Clear the hidden ID
+
+            // Set current date
+            const today = new Date();
+            const yyyy = today.getFullYear();
+            const mm = String(today.getMonth() + 1).padStart(2, '0');
+            const dd = String(today.getDate()).padStart(2, '0');
+            document.getElementById('date').value = `${yyyy}-${mm}-${dd}`;
+
+            // Clear GPS fields
+            document.getElementById('lat').value = '';
+            document.getElementById('lon').value = '';
+
+            currentEditingRecordId = null; // Reset editing state
+            document.getElementById('submitBtn').textContent = 'Save Data'; // Change button back to Save
         }
 
         /* --- Auto-GPS on load (mobile friendly) --- */
@@ -449,11 +506,7 @@
             });
 
             // Set current date on load
-            const today = new Date();
-            const yyyy = today.getFullYear();
-            const mm = String(today.getMonth() + 1).padStart(2, '0');
-            const dd = String(today.getDate()).padStart(2, '0');
-            document.getElementById('date').value = `${yyyy}-${mm}-${dd}`;
+            resetFormAndGPS(); // Use the new reset function to set date and clear form
         });
 
         /* --- GPS BUTTON --- */
@@ -501,20 +554,20 @@
             }
 
             try {
-                await addRecord(data);
-                showMessage('Data saved successfully offline ✔', 'success');
-                this.reset();
-                // Re-set date and clear GPS after reset
-                const today = new Date();
-                const yyyy = today.getFullYear();
-                const mm = String(today.getMonth() + 1).padStart(2, '0');
-                const dd = String(today.getDate()).padStart(2, '0');
-                document.getElementById('date').value = `${yyyy}-${mm}-${dd}`;
-                document.getElementById('lat').value = '';
-                document.getElementById('lon').value = '';
+                if (currentEditingRecordId) {
+                    // Update existing record
+                    data.id = currentEditingRecordId; // Add the ID back to the data object
+                    await updateRecord(data);
+                    showMessage('Data updated successfully offline ✔', 'success');
+                } else {
+                    // Add new record
+                    await addRecord(data);
+                    showMessage('Data saved successfully offline ✔', 'success');
+                }
+                resetFormAndGPS(); // Reset form and GPS fields
             } catch (error) {
-                console.error('Failed to save record:', error);
-                showMessage('Failed to save data.', 'error');
+                console.error('Operation failed:', error);
+                showMessage('Failed to save/update data.', 'error');
             }
         });
 
@@ -587,7 +640,8 @@
                 const ws = XLSX.utils.json_to_sheet(formatted);
                 const wb = XLSX.utils.book_new();
                 XLSX.utils.book_append_sheet(wb, ws, 'FieldData');
-                XLSX.writeFile(wb, 'Field_Data.xlsx');
+                const timestamp = new Date().toISOString().replace(/[:.-]/g, '');
+                XLSX.writeFile(wb, `Field_Data_${timestamp}.xlsx`);
                 showMessage('Data exported to Excel successfully!', 'success');
             } catch (error) {
                 console.error('Error during Excel export:', error);
@@ -606,14 +660,14 @@
             // 5. Handle network errors and retry logic.
         });
 
-        /* --- VIEW SAVED DATA --- */
+        /* --- VIEW SAVED DATA & EDIT --- */
         const savedDataSection = document.getElementById('savedDataSection');
         const savedTableHeader = document.getElementById('savedTableHeader');
         const savedTableBody = document.getElementById('savedTableBody');
+        const captureForm = document.getElementById('captureForm');
 
         document.getElementById('viewDataBtn').addEventListener('click', async () => {
             if (savedDataSection.classList.contains('visible')) {
-                // If already visible, close it
                 savedDataSection.classList.remove('visible');
                 showMessage('Data view closed.', 'info', 2000);
                 return;
@@ -626,28 +680,38 @@
                     return;
                 }
 
-                // Clear existing table content
                 savedTableHeader.innerHTML = '';
                 savedTableBody.innerHTML = '';
 
-                // Create table headers based on the fieldOrder and map
+                // Create table headers based on the fieldOrder and map, plus an 'Actions' column
                 const headerRow = document.createElement('tr');
                 fieldOrder.forEach(key => {
                     const th = document.createElement('th');
-                    // Use the map for display names, or default to key if not found
                     th.textContent = map[key] || key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
                     headerRow.appendChild(th);
                 });
+                const actionsTh = document.createElement('th');
+                actionsTh.textContent = 'Actions';
+                headerRow.appendChild(actionsTh);
                 savedTableHeader.appendChild(headerRow);
 
-                // Populate table body with data
+                // Populate table body with data and Add Edit Button
                 records.forEach(record => {
                     const row = document.createElement('tr');
                     fieldOrder.forEach(key => {
                         const td = document.createElement('td');
-                        td.textContent = record[key] || ''; // Display value, or empty string if null/undefined
+                        td.textContent = record[key] || '';
                         row.appendChild(td);
                     });
+
+                    const actionsTd = document.createElement('td');
+                    const editButton = document.createElement('button');
+                    editButton.textContent = 'Edit';
+                    editButton.classList.add('editBtn');
+                    // Store the record ID on the button for easy retrieval
+                    editButton.dataset.recordId = record.id;
+                    actionsTd.appendChild(editButton);
+                    row.appendChild(actionsTd);
                     savedTableBody.appendChild(row);
                 });
 
@@ -659,6 +723,52 @@
                 showMessage('Could not display saved data.', 'error');
             }
         });
+
+        // Event listener for the "Edit" buttons (delegated to the table body)
+        savedTableBody.addEventListener('click', async (event) => {
+            if (event.target.classList.contains('editBtn')) {
+                const recordId = parseInt(event.target.dataset.recordId, 10);
+                try {
+                    const recordToEdit = await getRecordById(recordId);
+                    if (recordToEdit) {
+                        // Populate the form fields with the data from the selected record
+                        for (const key in recordToEdit) {
+                            const inputElement = document.getElementById(key);
+                            if (inputElement) {
+                                // Handle date input specifically (needs YYYY-MM-DD format)
+                                if (key === 'date' && recordToEdit[key]) {
+                                    const dateParts = recordToEdit[key].split('/'); // Assuming YYYY/MM/DD
+                                    if (dateParts.length === 3) {
+                                        inputElement.value = `${dateParts[0]}-${dateParts[1]}-${dateParts[2]}`;
+                                    } else {
+                                        inputElement.value = recordToEdit[key]; // Fallback for other date formats
+                                    }
+                                } else {
+                                    inputElement.value = recordToEdit[key];
+                                }
+                            }
+                        }
+                        // Store the ID of the record being edited in the hidden input
+                        document.getElementById('recordId').value = recordId;
+                        currentEditingRecordId = recordId; // Set global flag
+
+                        // Change the submit button text to indicate editing mode
+                        document.getElementById('submitBtn').textContent = 'Update Data';
+
+                        // Scroll to the top of the form for better UX on mobile
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                        showMessage('Data loaded for editing.', 'info');
+                        savedDataSection.classList.remove('visible'); // Hide the table view
+                    } else {
+                        showMessage('Record not found for editing.', 'error');
+                    }
+                } catch (error) {
+                    console.error('Error loading record for editing:', error);
+                    showMessage('Failed to load record for editing.', 'error');
+                }
+            }
+        });
+
 
         document.getElementById('closeViewDataBtn').addEventListener('click', () => {
             savedDataSection.classList.remove('visible');
